@@ -8,8 +8,16 @@ import cron from 'node-cron'
 import { calculateActivityPercentage, calculateIdleTime } from './ActivityAnalyser'
 import { GivePermission } from './Permissions'
 import { takeScreenshotLinux } from './CronJobs'
+const sqlite3 = require('sqlite3').verbose();
+import moment from 'moment'
 
-
+let db = new sqlite3.Database('./data.db', (err) => {
+  if (err) {
+    console.error('Error opening database:', err.message);
+  } else {
+    console.log('Connected to the SQLite database.');
+  }
+});
 
 const isPackaged = app.isPackaged
 let mainWindow
@@ -157,15 +165,19 @@ let Cronjob
 
 
 
-let Isidle
 
-ipcMain.on('IdlemodalHasbeemclosed' , ()=> {
+
+ipcMain.on('IdlemodalHasbeemclosed', () => {
   console.log("modal has been closed")
   startDetection('mouse', mainWindow);
   startDetection('keyboard', mainWindow);
 })
 
 ipcMain.on('startdetection', () => {
+  if (Cronjob) {
+    console.log("existing cron job has been stopped")
+    Cronjob.stop()
+  }
 
   startDetection('mouse', mainWindow);
   startDetection('keyboard', mainWindow);
@@ -173,20 +185,34 @@ ipcMain.on('startdetection', () => {
   Cronjob = cron.schedule('* * * * *', () => {
     console.log('running a task every minute');
     const activityArr = getInteractionTimestamps();
-    // console.log(activityArr, "activityarr")
     const currenttimestamp = Date.now();
     const idleTime = calculateIdleTime(activityArr?.interactionTimestamps, currenttimestamp);
+    const currentTime = moment().format('HH:mm');
+    // Store data in the SQLite database
+    db.serialize(() => {
+      db.run('CREATE TABLE IF NOT EXISTS activity_data (timestamp INTEGER, idleTime INTEGER, activityPercent REAL)');
+      const stmt = db.prepare('INSERT INTO activity_data (timestamp, idleTime, activityPercent) VALUES (?, ?, ?)');
+      stmt.run(currentTime, idleTime, null); // Insert null for activityPercent when idleTime > 0
+      stmt.finalize();
+    });
 
     if (idleTime > 0) {
       mainWindow.webContents.send("showIdlemodal", idleTime);
       mainWindow.restore();
       stopDetection('mouse')
-      stopDetection('keyboard')  
+      stopDetection('keyboard')
     } else {
       console.log(idleTime, "idletime");
       const activityPercent = calculateActivityPercentage(activityArr?.interactionActivityTimestamps, 60);
       mainWindow.webContents.send("activitypersent", activityPercent);
       console.log(activityPercent, "activity percentage");
+
+      // Update the database with activityPercent when idleTime is 0
+      db.serialize(() => {
+        const updateStmt = db.prepare('UPDATE activity_data SET activityPercent = ? WHERE timestamp = ?');
+        updateStmt.run(activityPercent, currentTime);
+        updateStmt.finalize();
+      });
 
       if (process.platform === "linux") {
         takeScreenshotLinux();
@@ -194,15 +220,15 @@ ipcMain.on('startdetection', () => {
         handleScreenshot();
       }
     }
+
     resetInteractionTimeStampsForActivity();
   });
 });
 
-// ipcMain.on('IdlemodalHasbeemclosed', () => {
-//   isIdle = false
-// })
+
 
 ipcMain.on('stopdetection', () => {
+  db.run('DELETE FROM activity_data');
   Cronjob.stop()
   stopDetection('mouse')
   stopDetection('keyboard')
